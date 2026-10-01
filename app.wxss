@@ -1,0 +1,15 @@
+/**
+ * 全局样式
+ * 主题通过页面根节点的 .theme-dark / .theme-light 切换 CSS 变量实现
+ */
+page {
+  height: 100%;
+  background: #0f0b08;
+  font-family: -apple-system, 'PingFang SC', 'Helvetica Neue', sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* 书法字体（loadFontFace 注册的 XQBrush，回退楷体） */
+.brush {
+  font-family: 'XQBrush', 'STKaiti', 'KaiTi', serif;
+}

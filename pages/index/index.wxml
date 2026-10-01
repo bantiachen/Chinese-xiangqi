@@ -1,0 +1,187 @@
+<!--
+  阴阳象棋 主页面
+  结构：自定义导航栏 → 顶部状态栏 → Canvas 棋盘(含将军提示) → 提示语 → 底部操作区 → 设置面板 / 结算弹窗
+  表现层复用 v0zip 楚汉象棋；盲棋规则由 utils/game + RulesEngine 保证。
+-->
+<view class="page theme-{{theme}}">
+  <view class="ambient ambient-top"></view>
+  <view class="ambient ambient-bottom"></view>
+
+  <!-- ============ 自定义导航栏 ============ -->
+  <view class="navbar" style="padding-top: {{statusBarHeight}}px; height: {{navHeight}}px;">
+    <view class="nav-actions">
+      <!-- 棋局模式切换：太阳 → 传统象棋（明棋）；月亮 → 阴阳象棋（暗棋） -->
+      <view
+        class="nav-btn nav-mode"
+        hover-class="pressed"
+        hover-stay-time="120"
+        bindtap="onToggleMode"
+        aria-role="button"
+        aria-label="切换到{{modeIcon === 'sun' ? '传统象棋' : '阴阳象棋'}}"
+      >
+        <image class="nav-icon" src="/assets/icons/{{modeIcon === 'sun' ? 'sun' : 'moon'}}.png" />
+      </view>
+      <view class="nav-btn" hover-class="pressed" hover-stay-time="120" bindtap="onFlip" aria-role="button" aria-label="翻转棋盘">
+        <image class="nav-icon" src="/assets/icons/flip.png" />
+      </view>
+    </view>
+
+    <view class="nav-title">
+      <text class="title brush">阴阳象棋</text>
+    </view>
+
+    <!-- 对战模式切换：双人 ⇄ 人机（右上角，动态避让微信系统胶囊） -->
+    <view class="nav-actions-right" style="right: {{menuRight}}px;">
+      <view
+        class="nav-pill {{playerMode === 'one' ? 'active' : ''}}"
+        hover-class="pressed"
+        hover-stay-time="120"
+        bindtap="onTogglePlayerMode"
+        aria-role="button"
+        aria-label="切换对战模式，当前{{playerMode === 'one' ? '人机' : '双人'}}"
+      >
+        <text class="nav-pill-text">{{playerMode === 'one' ? '人机' : '双人'}}</text>
+      </view>
+    </view>
+  </view>
+
+  <!-- ============ 顶部状态栏 ============ -->
+  <view class="status glass">
+    <view class="status-main">
+      <view class="player {{turn === 'black' && !gameOver ? 'active active-b' : ''}}">
+        <view class="avatar avatar-b brush">将</view>
+        <view class="pinfo">
+          <text class="pname">{{blackName}}</text>
+          <text class="ptime">{{blackTime}}</text>
+        </view>
+      </view>
+
+      <view class="round">
+        <view class="round-line">
+          <text class="round-label">第</text>
+          <text class="round-num">{{round}}</text>
+          <text class="round-label">回合</text>
+        </view>
+        <view class="turn-chip turn-{{turn}}">
+          <view class="turn-dot"></view>
+          <text>{{turnText}}</text>
+        </view>
+      </view>
+
+      <view class="player player-right {{turn === 'red' && !gameOver ? 'active active-r' : ''}}">
+        <view class="pinfo pinfo-right">
+          <text class="pname">{{redName}}</text>
+          <text class="ptime">{{redTime}}</text>
+        </view>
+        <view class="avatar avatar-r brush">帅</view>
+      </view>
+    </view>
+
+    <view class="captures">
+      <view class="cap-row">
+        <view wx:for="{{capturedByBlack}}" wx:key="id" class="mini mini-{{item.side}} brush">{{item.text}}</view>
+        <text wx:if="{{!capturedByBlack.length}}" class="cap-empty">暂无吃子</text>
+      </view>
+      <view class="cap-divider"></view>
+      <view class="cap-row cap-row-right">
+        <text wx:if="{{!capturedByRed.length}}" class="cap-empty">暂无吃子</text>
+        <view wx:for="{{capturedByRed}}" wx:key="id" class="mini mini-{{item.side}} brush">{{item.text}}</view>
+      </view>
+    </view>
+  </view>
+
+  <!-- ============ 棋盘 ============ -->
+  <view class="board-wrap" style="width: {{boardWidth}}px; height: {{boardHeight}}px;" hidden="{{settingsVisible || gameOver}}">
+    <canvas
+      type="2d"
+      id="board"
+      class="board-canvas"
+      style="width: {{boardWidth}}px; height: {{boardHeight}}px;"
+      bindtouchstart="onBoardTouch"
+      disable-scroll
+    ></canvas>
+
+    <!-- 将军提示 -->
+    <view class="check-banner {{checkAnim ? 'show' : ''}}">
+      <view class="check-ring"></view>
+      <text class="check-text brush">{{checkBannerText}}</text>
+    </view>
+  </view>
+
+  <!-- 状态提示语 -->
+  <view class="tip">
+    <text>{{tipText}}</text>
+    <!-- 人机模式：明确显示当前该谁走 -->
+    <view wx:if="{{currentPlayerText}}" class="now-player">
+      <view class="now-dot now-{{turn}}"></view>
+      <text class="now-text">{{currentPlayerText}}</text>
+    </view>
+  </view>
+
+  <!-- ============ 底部操作区 ============ -->
+  <view class="actions" style="padding-bottom: {{safeBottom}}px;">
+    <view class="action glass" hover-class="action-pressed" hover-stay-time="100" bindtap="onUndo" aria-role="button" aria-label="悔棋">
+      <image class="action-icon" src="/assets/icons/undo.png" />
+      <text class="action-label">悔棋</text>
+    </view>
+    <view class="action glass" hover-class="action-pressed" hover-stay-time="100" bindtap="onToggleSfx" aria-role="button" aria-label="音效">
+      <image class="action-icon" src="/assets/icons/hint.png" />
+      <text class="action-label">音效{{sfxOn ? '开' : '关'}}</text>
+    </view>
+    <view class="action glass action-primary" hover-class="action-pressed" hover-stay-time="100" bindtap="onNewGame" aria-role="button" aria-label="新局">
+      <image class="action-icon" src="/assets/icons/new.png" />
+      <text class="action-label">新局</text>
+    </view>
+    <view class="action glass" hover-class="action-pressed" hover-stay-time="100" bindtap="onOpenSettings" aria-role="button" aria-label="设置">
+      <image class="action-icon" src="/assets/icons/settings.png" />
+      <text class="action-label">设置</text>
+    </view>
+  </view>
+
+  <!-- 将军时的屏幕边缘红色闪烁 -->
+  <view class="check-flash {{checkAnim ? 'show' : ''}}"></view>
+
+  <!-- ============ 设置面板 ============ -->
+  <view wx:if="{{settingsVisible}}" class="mask {{settingsOpen ? 'mask-show' : ''}}" bindtap="onCloseSettings"></view>
+  <view wx:if="{{settingsVisible}}" class="sheet" animation="{{sheetAnimation}}" catchtap="noop">
+    <view class="sheet-handle"></view>
+    <text class="sheet-title brush">对弈设置</text>
+
+    <view class="setting-row">
+      <view class="setting-text">
+        <text class="setting-name">显示可走位置</text>
+        <text class="setting-desc">选中棋子后显示呼吸提示点</text>
+      </view>
+      <switch checked="{{showMoves}}" color="#c9a24e" bindchange="onSwitchShowMoves" />
+    </view>
+    <view class="setting-row">
+      <view class="setting-text">
+        <text class="setting-name">震动反馈</text>
+        <text class="setting-desc">落子、吃子、将军时轻震</text>
+      </view>
+      <switch checked="{{vibrate}}" color="#c9a24e" bindchange="onSwitchVibrate" />
+    </view>
+    <view class="setting-row">
+      <view class="setting-text">
+        <text class="setting-name">背景音乐</text>
+        <text class="setting-desc">古典循环（已内置，Mureka「中国象棋」）</text>
+      </view>
+      <switch checked="{{bgmOn}}" color="#c9a24e" bindchange="onSwitchBgm" />
+    </view>
+
+    <view class="sheet-done" hover-class="action-pressed" bindtap="onCloseSettings">完成</view>
+  </view>
+
+  <!-- ============ 结算弹窗 ============ -->
+  <view wx:if="{{gameOver}}" class="mask mask-show">
+    <view class="result glass">
+      <view class="result-seal brush result-{{winner}}">{{winner === 'red' ? '帅' : '将'}}</view>
+      <text class="result-title brush">{{winner === 'red' ? '红方胜' : '黑方胜'}}</text>
+      <text class="result-desc">{{resultDesc}}</text>
+      <view class="result-actions">
+        <view class="result-btn ghost" hover-class="action-pressed" bindtap="onReview">复盘</view>
+        <view class="result-btn primary" hover-class="action-pressed" bindtap="onNewGame">再来一局</view>
+      </view>
+    </view>
+  </view>
+</view>
