@@ -4,7 +4,13 @@
 //
 // 编码约定（viewBoard / renderer 共用）：
 //   明子：'rK' / 'bC' ...   ← 颜色首字母 + 类型码
-//   暗子：'r_' / 'b_'       ← 颜色首字母 + 下划线（背面，无字）
+//   暗子：'x_'             ← 中性码（与 red/black 无关，统一背面，绝不泄漏阵营）
+//     暗棋在开局全场随机落位、红黑混住，若背面按颜色区分（旧写法 'r_' / 'b_'），
+//     玩家一眼就能看出哪枚是红子、哪枚是黑子 —— 必须统一为同一个编码，
+//     只有翻开为明棋（state=1）后才按真实颜色 + 身份渲染。
+
+/** 暗棋（背面）统一编码：颜色中立，凡 state===0 一律返回它 */
+const HIDDEN_CODE = 'x_'
 
 /** 真实身份 → 中文名（按颜色区分正/繁体写法） */
 const CHAR = {
@@ -18,8 +24,8 @@ const TYPE_CODE = { jiang: 'K', che: 'R', ma: 'N', xiang: 'B', shi: 'A', pao: 'C
 /** 未知类型时的兜底编码（与「兵」同码，保证不会渲染成空白） */
 const FALLBACK_TYPE = 'P'
 
-/** 渲染编码 → 显示文字（由 CHAR + TYPE_CODE 派生，含暗子背面空串） */
-const PIECE_TEXT = { r_: '', b_: '' }
+/** 渲染编码 → 显示文字（由 CHAR + TYPE_CODE 派生；暗子背面无字） */
+const PIECE_TEXT = { x_: '' }
 Object.keys(TYPE_CODE).forEach(function (realType) {
   const code = TYPE_CODE[realType]
   PIECE_TEXT['r' + code] = CHAR.red[realType]
@@ -34,13 +40,13 @@ function charOf(color, realType) {
 /**
  * 棋子对象 → 渲染编码
  * @param {{color:string,state:number,realType:string}|null} p
- * @returns {string|null} 明子 'rK' / 'bC'，暗子 'r_' / 'b_'，空棋子 null
+ * @returns {string|null} 明子 'rK' / 'bC'，暗子统一 'x_'，空棋子 null
  */
 function encodePiece(p) {
   if (!p) return null
+  if (p.state === 0) return HIDDEN_CODE // 暗棋：颜色中立，翻面前不暴露红黑
   const side = p.color === 'red' ? 'r' : 'b'
-  if (p.state === 0) return side + '_' // 暗棋背面
   return side + (TYPE_CODE[p.realType] || FALLBACK_TYPE)
 }
 
-module.exports = { CHAR, TYPE_CODE, PIECE_TEXT, charOf, encodePiece }
+module.exports = { HIDDEN_CODE, CHAR, TYPE_CODE, PIECE_TEXT, charOf, encodePiece }

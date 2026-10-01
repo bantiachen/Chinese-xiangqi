@@ -2,9 +2,11 @@
  * 阴阳象棋 · Canvas 2D 渲染器（小程序 CommonJS 版，改编自 v0zip 楚汉象棋）
  * ------------------------------------------------------------
  * 适配要点（不改变盲棋规则，仅扩展表现层）：
- *   - 棋盘字符串编码：明子 'rK'/'bC'...；暗子（背面）'r_'/'b_'
+ *   - 棋盘字符串编码：明子 'rK'/'bC'...；暗子（背面）统一为 'x_'（颜色中立，
+ *     红黑共用同一张背面，不泄漏阵营；翻面后才变 'r…'/'b…' 上色）
  *   - drawPieceTo 新增暗子背面绘制（纯色圆盘 + 中心纹样，无字）
  *   - 新增 revealPiece / spawnRevealParticles：暗→明翻面时的金光迸发
+ *   - 新增 landPiece：落地压扁回弹 + 尘环，统一行棋落地与翻面金光的「顿感」
  *   - 性能策略沿用：棋盘缓存离屏 Canvas、棋子预渲染精灵图、静止自停 rAF
  */
 
@@ -53,18 +55,31 @@ const THEMES = {
 }
 
 /* ------------------------------ 棋子配色 ------------------------------ */
+// 键位对应渲染编码首字母：r=红子、b=黑子、x=暗棋统一背面
+// 背面（x）必须是「颜色中立」的暗色：既不能偏红也不能偏黑，否则等于把阵营写在了牌背上。
+// 注意：shock 用字面量（GOLD 声明在下方，对象字面量里直接引用会触发 TDZ）。
 const PIECE_STYLE = {
   r: {
     body: ['#e5543c', '#b8281b', '#7a130c'],
     rim: ['#fbe6ac', '#c99a3e', '#8a6420', '#f3d184'],
     text: ['#fff1c9', '#f1cd7a', '#c99a3e'],
     particle: ['#e5543c', '#f3d184', '#ffb27a', '#b8281b'],
+    shock: '240,200,110',
   },
   b: {
     body: ['#4a4b52', '#22232a', '#0b0b0f'],
     rim: ['#ffffff', '#b9bec6', '#6d727a', '#e8ebef'],
     text: ['#ffffff', '#dfe3e8', '#9aa0a8'],
     particle: ['#2a2b31', '#dfe3e8', '#9aa0a8', '#ffffff'],
+    shock: '220,225,232',
+  },
+  x: {
+    // 暗棋背面：墨褐木胎 + 骨色（石色）圈口 —— 单纯「一块盖着的木牌」
+    body: ['#5a4c40', '#332a23', '#171310'],
+    rim: ['#cfc3ac', '#a1937c', '#635844', '#beb29a'],
+    text: ['#cfc3ac', '#a1937c', '#635844'],
+    particle: ['#6b5b4a', '#d8bd8a', '#a98a52', '#3a3128'],
+    shock: '200,190,170',
   },
 }
 
@@ -203,6 +218,27 @@ function createRenderer(opts) {
   let rafId = null
   let lastTime = 0
   let destroyed = false
+
+  /** 落子「顿」感时长：落地压扁 → 阻尼回弹 → 静止（约 0.4s，其中前 0.15s 为可见冲击） */
+  const LAND_DUR = 400
+
+  /** 行棋动画时长：按距离伸缩（短距干脆、长距从容），避免「一帧滑到底」的僵硬感 */
+  function moveDuration(move) {
+    const dist = Math.max(Math.abs(move.tr - move.fr), Math.abs(move.tc - move.fc))
+    return Math.min(400, Math.max(180, 150 + dist * 34))
+  }
+
+  /**
+   * 落地统一入口：挤压回弹 + 贴地尘环 + 地面投影收拢。
+   * 行棋动画结束与「翻面金光」都走这里，因此不会出现二次弹跳造成的重复停顿。
+   */
+  function landPiece(r, c, now) {
+    landAnim = { r: r, c: c, start: now || Date.now(), dur: LAND_DUR }
+    const { x, y } = toScreen(r, c)
+    // 贴地尘环：细、短、淡，与吃子/翻面的冲击波区分开
+    shockwaves.push({ x: x, y: y + R * 0.35, start: now || Date.now(), dur: 320, color: GOLD, from: 0.72, grow: 0.5, maxAlpha: 0.4, width: 1.6 })
+    spawnParticles(x, y + R * 0.45, ['#d8bd8a', '#a98a52'], 6, 0.15, 0.7)
+  }
 
   function toScreen(r, c) {
     const vr = state.flipped ? ROWS - 1 - r : r
@@ -480,18 +516,39 @@ function createRenderer(opts) {
     return spriteCache[piece]
   }
 
-  function drawPiece(piece, x, y, scale = 1, alpha = 1) {
+  /**
+   * 绘制棋子
+   * @param {number} scale  整体缩放
+   * @param {number} alpha  透明度
+   * @param {number} squash 横向/纵向挤压系数（>1 压扁、<1 拉长），用于落地冲击的「压扁回弹」
+   */
+  function drawPiece(piece, x, y, scale = 1, alpha = 1, squash = 1) {
     ctx.save()
     ctx.globalAlpha = alpha
     const sp = getSprite(piece)
     if (sp) {
-      const s = sp.size * scale
-      ctx.drawImage(sp.canvas, x - s / 2, y - s / 2, s, s)
+      const sw = sp.size * scale * squash
+      const sh = sp.size * scale / squash
+      // 压扁时把「底边」钉在原地，冲击感才自然（整体缩放仍以中心对齐，保持原有观感）
+      const anchor = squash === 1 ? 0 : (sp.size - sh) / 2
+      ctx.drawImage(sp.canvas, x - sw / 2, y - sh / 2 + anchor, sw, sh)
     } else {
-      ctx.translate(x, y)
-      ctx.scale(scale, scale)
+      ctx.translate(x, squash === 1 ? y : y + R * (1 - 1 / squash))
+      ctx.scale(scale * squash, scale / squash)
       drawPieceTo(ctx, piece, 0, 0, R)
     }
+    ctx.restore()
+  }
+
+  /** 贴地投影：飞行中的棋子影子随「高度」变小变淡（rise: 0=贴地 1=最高点） */
+  function drawDropShadow(x, groundY, rise) {
+    const k = 1 - rise * 0.55
+    ctx.save()
+    ctx.globalAlpha = 0.3 * k
+    ctx.fillStyle = '#000000'
+    ctx.beginPath()
+    ellipsePath(ctx, x, groundY + R * 0.42, R * 0.92 * k, R * 0.3 * k)
+    ctx.fill()
     ctx.restore()
   }
 
@@ -587,18 +644,18 @@ function createRenderer(opts) {
   }
 
   /* ---------------------------- 粒子系统 ---------------------------- */
-  function spawnParticles(x, y, colors, count, squareRate) {
+  function spawnParticles(x, y, colors, count, squareRate, power = 1) {
     for (let i = 0; i < count; i++) {
       const ang = Math.random() * Math.PI * 2
-      const speed = 40 + Math.random() * 170
+      const speed = (40 + Math.random() * 170) * power
       particles.push({
         x: x + Math.cos(ang) * R * 0.4,
         y: y + Math.sin(ang) * R * 0.4,
         vx: Math.cos(ang) * speed,
-        vy: Math.sin(ang) * speed - 40,
+        vy: Math.sin(ang) * speed - 40 * power,
         life: 0,
-        max: 0.5 + Math.random() * 0.6,
-        size: 1.2 + Math.random() * 3.2,
+        max: (0.5 + Math.random() * 0.6) * Math.max(0.6, power),
+        size: (1.2 + Math.random() * 3.2) * Math.max(0.6, power),
         color: colors[i % colors.length],
         square: Math.random() < squareRate,
         rot: Math.random() * Math.PI,
@@ -608,14 +665,16 @@ function createRenderer(opts) {
   }
 
   function spawnCaptureParticles(x, y, piece) {
-    spawnParticles(x, y, PIECE_STYLE[piece[0]].particle, 46, 0.45)
-    shockwaves.push({ x, y, start: Date.now(), dur: 520, color: piece[0] === 'r' ? GOLD : '220,225,232' })
+    const st = PIECE_STYLE[piece[0]] || PIECE_STYLE.x
+    spawnParticles(x, y, st.particle, 46, 0.45)
+    // 冲击波颜色随棋子阵营：红=金、黑=银白、暗子背面=石色（不泄漏阵营）
+    shockwaves.push({ x, y, start: Date.now(), dur: 520, color: st.shock })
     ghosts.push({ x, y, piece, start: Date.now(), dur: 380 })
   }
 
-  /** 翻面金光：暗→明瞬间迸发 */
+  /** 翻面金光：暗→明瞬间迸发（颜色必须是合法 CSS 值，否则 canvas 会沿用上一次填充色） */
   function spawnRevealParticles(x, y) {
-    spawnParticles(x, y, [GOLD, '255,235,170', '255,255,255', '200,160,70'], 44, 0.28)
+    spawnParticles(x, y, ['#f0c86e', '#ffebaa', '#fff8e2', '#c8a046'], 44, 0.28)
     shockwaves.push({ x, y, start: Date.now(), dur: 640, color: GOLD })
   }
 
@@ -642,10 +701,14 @@ function createRenderer(opts) {
     shockwaves = shockwaves.filter((s) => {
       const p = (now - s.start) / s.dur
       if (p >= 1) return false
-      ctx.strokeStyle = `rgba(${s.color},${(1 - p) * 0.8})`
-      ctx.lineWidth = 2.5 * (1 - p) + 0.5
+      const from = s.from === undefined ? 0.9 : s.from
+      const grow = s.grow === undefined ? 1.4 : s.grow
+      const maxAlpha = s.maxAlpha === undefined ? 0.8 : s.maxAlpha
+      const width = s.width === undefined ? 2.5 : s.width
+      ctx.strokeStyle = `rgba(${s.color},${(1 - p) * maxAlpha})`
+      ctx.lineWidth = width * (1 - p) + 0.5
       ctx.beginPath()
-      ctx.arc(s.x, s.y, R * (0.9 + easeOutCubic(p) * 1.4), 0, Math.PI * 2)
+      ctx.arc(s.x, s.y, R * (from + easeOutCubic(p) * grow), 0, Math.PI * 2)
       ctx.stroke()
       return true
     })
@@ -738,14 +801,20 @@ function createRenderer(opts) {
       const a = toScreen(moveAnim.move.fr, moveAnim.move.fc)
       const b = toScreen(moveAnim.move.tr, moveAnim.move.tc)
       const e = easeInOutCubic(p)
-      movingPos = { x: a.x + (b.x - a.x) * e, y: a.y + (b.y - a.y) * e - Math.sin(p * Math.PI) * cell * 0.18 }
-      movingScale = 1.08 + Math.sin(p * Math.PI) * 0.06
+      // 抛物弧高度随距离伸缩，「高抛远、轻推近」，落点更准
+      const arc = Math.sin(p * Math.PI) * cell * (0.1 + Math.min(0.1, Math.abs(b.x - a.x) / cell * 0.012))
+      const groundX = a.x + (b.x - a.x) * e
+      const groundY = a.y + (b.y - a.y) * e
+      movingPos = { x: groundX, y: groundY - arc }
+      movingScale = 1.05 + Math.sin(p * Math.PI) * 0.05
+      drawDropShadow(groundX, groundY, Math.sin(p * Math.PI) * 0.75)
       if (p >= 1) {
         const m = moveAnim
         moveAnim = null
         movingPos = null
-        landAnim = { r: m.move.tr, c: m.move.tc, start: now, dur: 300 }
         if (m.captured) spawnCaptureParticles(b.x, b.y, m.captured)
+        // 落地：压扁回弹 + 尘环（同一帧内完成，棋子不会「先停一下再弹」）
+        landPiece(m.move.tr, m.move.tc, now)
         if (m.onLand) m.onLand()
       }
     }
@@ -766,12 +835,18 @@ function createRenderer(opts) {
           continue
         }
         let scale = 1
+        let squash = 1
         if (landAnim && landAnim.r === r && landAnim.c === c) {
-          const p = (now - landAnim.start) / landAnim.dur
-          if (p >= 1) landAnim = null
-          else scale = 1 + 0.08 * (1 - p) * Math.cos(p * Math.PI * 2.5)
+          const lp = (now - landAnim.start) / landAnim.dur
+          if (lp >= 1) landAnim = null
+          else {
+            // 阻尼回弹：落地瞬间压扁（约 +14%）→ 轻微拉长 → 收敛静止，约 1.5 个周期内结束
+            const damp = Math.exp(-5.5 * lp) * Math.cos(lp * Math.PI * 3)
+            squash = 1 + 0.14 * damp
+            scale = 1 + 0.04 * damp
+          }
         }
-        drawPiece(piece, x, y, scale)
+        drawPiece(piece, x, y, scale, 1, squash)
       }
     }
 
@@ -817,12 +892,18 @@ function createRenderer(opts) {
       invalidate()
     },
     animateMove(move, piece, captured, onLand) {
-      moveAnim = { move, piece, captured, start: Date.now(), dur: 240, onLand }
+      moveAnim = { move, piece, captured, start: Date.now(), dur: moveDuration(move), onLand }
       invalidate()
     },
-    /** 翻面金光：在 (r,c) 处触发金光迸发 + 落子回弹 */
+    /**
+     * 翻面金光：在 (r,c) 处迸发金光 + 完成落地回弹。
+     * 若该格刚由行棋动画落地（landAnim 正在进行），只叠加金光、**不重置回弹**，
+     * 避免「落地停一下 → 再弹一次」的二次停顿。
+     */
     revealPiece(r, c) {
-      landAnim = { r, c, start: Date.now(), dur: 360 }
+      const now = Date.now()
+      const ongoing = landAnim && landAnim.r === r && landAnim.c === c && now - landAnim.start < landAnim.dur * 0.65
+      if (!ongoing) landPiece(r, c, now)
       const { x, y } = toScreen(r, c)
       spawnRevealParticles(x, y)
       invalidate()

@@ -2,10 +2,13 @@
  * 阴阳象棋 · AI 机器人（单机模式）
  * ------------------------------------------------------------
  * 【公平性硬约束】（不可破坏）
- *   1. 走法全部来自 RulesEngine.generateLegalMoves —— AI 在盲棋下同样「暗棋按棋位行棋」。
- *   2. 不窥视暗棋真实身份：本次搜索开始时仍是暗子的棋子（按 id 记录到 hiddenIds），
- *      整棵搜索树内一律按名义值 HIDDEN_VALUE 估值，即便它在某条变化中「被翻面」也不
- *      提前读取 realType。AI 的信息量与真人玩家严格一致。
+ *   1. 走法全部来自 RulesEngine.generateLegalMoves —— AI 在盲棋下同样「暗棋按棋位行棋」，
+ *      且「谁能操作哪枚暗子」也由棋位归属决定，与真人规则完全一致。
+ *   2. 不窥视暗棋：搜索前把「搜索开始时仍是暗子」的棋子临时改写为**棋位职责**
+ *      （棋位类型 = 该位置在明棋布局里的那枚子；棋位归属 = 红方半场归红 / 黑方半场归黑），
+ *      真实 realType 与真实颜色整棵搜索树都读不到；搜索结束后原样还原（try/finally）。
+ *      理由：0 状态的暗子按规则就等同该棋位的那枚子，而这些信息（棋位类型/归属）双方都看得见；
+ *      若改读真身，AI 就能挑出「哪些暗子是自己人 / 是不是车」，而玩家无法得知。
  *   3. 遵守长将判负：连续将军超过 MAX_CONSECUTIVE_CHECKS 次的走法按判负处理（除非是杀棋）。
  *
  * 【搜索】
@@ -32,8 +35,13 @@ const VALUE = {
   bing: 100,
 }
 
-/** 暗棋名义估值：看不到真实身份，按「中等子力」保守估计 */
+/** 暗棋名义估值：看不到真实身份时，按「该棋位在明棋布局里的那枚子」估值（棋位类型是双方可见信息） */
 const HIDDEN_VALUE = 300
+
+/** 棋位类型 → 该棋位职责的子力价值（暗子估值用；将帅位不会出现暗子） */
+function roleValue(p) {
+  return VALUE[p.initialPositionType] || HIDDEN_VALUE
+}
 
 /** 杀棋分值（用于区分「将死」与一般优势） */
 const MATE = 1000000
@@ -61,13 +69,25 @@ function pieceValue(p) {
 }
 
 /**
- * 搜索内取值：本局搜索开始时是暗子的棋子，全程按名义值，不读 realType。
+ * 搜索内取值：本局搜索开始时是暗子的棋子，**真实身份与真实颜色都不可读**，
+ * 一律按「棋位职责」估值 —— 棋位类型与棋位归属都是双方看得见的公开信息，
+ * 所以这既贴合规则（0 状态的暗子就等同该棋位在明棋布局里的那枚子），也不构成偷看。
+ * 若改读真实 realType/颜色，AI 就能挑出「哪些暗子是自己人 / 是不是车」——玩家无法得知。
  * @param {Set<string>} hiddenIds
  */
 function valueOf(p, hiddenIds) {
   if (!p) return 0
-  if (hiddenIds && hiddenIds.has(p.id)) return HIDDEN_VALUE
-  return p.state === 1 ? VALUE[p.realType] || 100 : HIDDEN_VALUE
+  if (hiddenIds && hiddenIds.has(p.id)) return roleValue(p)
+  return p.state === 1 ? VALUE[p.realType] || 100 : roleValue(p)
+}
+
+/**
+ * 棋子用于估值的归属：搜索开始时是暗子的 → 棋位阵营；明棋 → 真实颜色。
+ * 与 RulesEngine.pieceSide 完全一致（这里只是把「暗子归属」的判定再走一遍）。
+ */
+function valueSide(p, y, hiddenIds) {
+  if (p.state === 0 || (hiddenIds && hiddenIds.has(p.id))) return RE.pieceSide(p, y)
+  return p.color
 }
 
 /**
@@ -105,9 +125,10 @@ function evaluate(board, forColor, hiddenIds) {
     for (let x = 0; x < 9; x++) {
       const p = board[y][x]
       if (!p) continue
-      let v = valueOf(p, hiddenIds)
-      if (p.state === 1 && !(hiddenIds && hiddenIds.has(p.id))) v += pstBonus(p, x, y)
-      score += p.color === forColor ? v : -v
+      // 子力 + 位置奖励：暗子按「棋位职责」（棋位类型/归属都是公开信息），明棋按真实身份
+      const v = valueOf(p, hiddenIds) + pstBonus(p, x, y)
+      // 归属：搜索开始时是暗子的 → 棋位阵营；明棋 → 真实颜色
+      score += valueSide(p, y, hiddenIds) === forColor ? v : -v
     }
   }
   const opp = other(forColor)
@@ -289,96 +310,112 @@ function chooseMove(board, aiColor, depth, opts) {
   const nodeBudget = opts.nodeBudget || DEFAULT_NODE_BUDGET
   const opp = other(aiColor)
 
-  const moves = RE.generateLegalMoves(board, aiColor)
-  if (!moves.length) return null
-
-  // 记录本局搜索开始时仍是暗子的棋子 id —— 全程不读取它们的 realType
+  // ---- 构造「公开信息盘」（核心公平性）----
+  // 搜索开始时仍是暗子的棋子：抹掉真身（realType 与其真实颜色），代之以**棋位职责**
+  // （棋位类型 = 该位置在明棋布局里的那枚子；棋位归属 = 红方半场归红 / 黑方半场归黑）。
+  // 这些都是双方看得见的公开信息，AI 也就只能用这些信息；真实身份/颜色整棵搜索树都读不到。
+  // 搜索只产出坐标；结束后原样还原调用方的棋子对象（try/finally 保证异常也会还原）。
   const hiddenIds = new Set()
+  const masked = []
   for (let y = 0; y < 10; y++) {
     for (let x = 0; x < 9; x++) {
       const p = board[y][x]
-      if (p && p.state === 0) hiddenIds.add(p.id)
+      if (!p || p.state !== 0) continue
+      hiddenIds.add(p.id)
+      masked.push({ p: p, realType: p.realType, color: p.color })
+      p.realType = p.initialPositionType
+      p.color = RE.pieceSide(p, y)
     }
   }
 
-  const ctx = {
-    nodes: 0,
-    nodeBudget: nodeBudget,
-    deadline: Date.now() + timeBudget,
-    aborted: false,
-    hiddenIds: hiddenIds,
-    streak: { red: 0, black: 0 },
-    tt: new Map(),
-    killers: [],
-    history: {},
-  }
-  if (opts.checkStreak) {
-    ctx.streak.red = opts.checkStreak.red || 0
-    ctx.streak.black = opts.checkStreak.black || 0
-  }
+  try {
+    const moves = RE.generateLegalMoves(board, aiColor)
+    if (!moves.length) return null
 
-  let best = moves[0]
-  let bestScore = -Infinity
-
-  // 迭代加深：浅层先出结果，深层在时间允许时替换；超时则沿用上一完整层的答案
-  for (let d = 1; d <= maxDepth; d++) {
-    let localBest = null
-    let localScore = -Infinity
-
-    const key = hashBoard(board, aiColor)
-    const ttMove = ctx.tt.get(key) ? ctx.tt.get(key).bestMove : null
-    orderMoves(board, moves, ctx, 0, ttMove)
-
-    for (let i = 0; i < moves.length; i++) {
-      const m = moves[i]
-      const u = RE.makeMove(board, m.from, m.to)
-      const gives = RE.isGeneralUnderAttack(board, opp)
-
-      const prev = ctx.streak[aiColor]
-      ctx.streak[aiColor] = gives ? prev + 1 : 0
-      // 根节点一律用「全窗口」精确搜索：
-      // 若用 alpha 收窄窗口，劣势着法只会返回一个上界值（数值上等于当前最佳分），
-      // 叠加随机扰动后就可能被误当成最佳着法。全窗口保证每个候选都是真实分。
-      let s = -negamax(board, opp, d - 1, -Infinity, Infinity, 1, ctx)
-      if (gives && ctx.streak[aiColor] > MAX_CONSECUTIVE_CHECKS && s < MATE - 10000) s = -MATE
-      ctx.streak[aiColor] = prev
-
-      RE.unmakeMove(board, m.from, m.to, u)
-
-      // 避免原地来回挪子：本步若恰好是自己上一步的「反向撤回」，轻微扣分
-      if (
-        opts.prevMove &&
-        m.from.x === opts.prevMove.to.x &&
-        m.from.y === opts.prevMove.to.y &&
-        m.to.x === opts.prevMove.from.x &&
-        m.to.y === opts.prevMove.from.y
-      ) {
-        s -= 8
-      }
-      // 极小随机扰动：同分时避免每局一模一样
-      s += Math.random() * 3
-
-      if (s > localScore) {
-        localScore = s
-        localBest = m
-      }
-      if (ctx.aborted) break
+    const ctx = {
+      nodes: 0,
+      nodeBudget: nodeBudget,
+      deadline: Date.now() + timeBudget,
+      aborted: false,
+      hiddenIds: hiddenIds,
+      streak: { red: 0, black: 0 },
+      tt: new Map(),
+      killers: [],
+      history: {},
+    }
+    if (opts.checkStreak) {
+      ctx.streak.red = opts.checkStreak.red || 0
+      ctx.streak.black = opts.checkStreak.black || 0
     }
 
-    if (ctx.aborted && d > 1) break // 本层没搜完 → 采用上一层结果
-    if (localBest) {
-      best = localBest
-      bestScore = localScore
-      const idx = moves.indexOf(localBest)
-      if (idx > 0) {
-        moves.splice(idx, 1)
-        moves.unshift(localBest)
-      }
-    }
-    if (bestScore >= MATE - 10000) break // 已算到杀棋，不必再深搜
-  }
+    let best = moves[0]
+    let bestScore = -Infinity
 
-  return best
+    // 迭代加深：浅层先出结果，深层在时间允许时替换；超时则沿用上一完整层的答案
+    for (let d = 1; d <= maxDepth; d++) {
+      let localBest = null
+      let localScore = -Infinity
+
+      const key = hashBoard(board, aiColor)
+      const ttMove = ctx.tt.get(key) ? ctx.tt.get(key).bestMove : null
+      orderMoves(board, moves, ctx, 0, ttMove)
+
+      for (let i = 0; i < moves.length; i++) {
+        const m = moves[i]
+        const u = RE.makeMove(board, m.from, m.to)
+        const gives = RE.isGeneralUnderAttack(board, opp)
+
+        const prev = ctx.streak[aiColor]
+        ctx.streak[aiColor] = gives ? prev + 1 : 0
+        // 根节点一律用「全窗口」精确搜索：
+        // 若用 alpha 收窄窗口，劣势着法只会返回一个上界值（数值上等于当前最佳分），
+        // 叠加随机扰动后就可能被误当成最佳着法。全窗口保证每个候选都是真实分。
+        let s = -negamax(board, opp, d - 1, -Infinity, Infinity, 1, ctx)
+        if (gives && ctx.streak[aiColor] > MAX_CONSECUTIVE_CHECKS && s < MATE - 10000) s = -MATE
+        ctx.streak[aiColor] = prev
+
+        RE.unmakeMove(board, m.from, m.to, u)
+
+        // 避免原地来回挪子：本步若恰好是自己上一步的「反向撤回」，轻微扣分
+        if (
+          opts.prevMove &&
+          m.from.x === opts.prevMove.to.x &&
+          m.from.y === opts.prevMove.to.y &&
+          m.to.x === opts.prevMove.from.x &&
+          m.to.y === opts.prevMove.from.y
+        ) {
+          s -= 8
+        }
+        // 极小随机扰动：同分时避免每局一模一样
+        s += Math.random() * 3
+
+        if (s > localScore) {
+          localScore = s
+          localBest = m
+        }
+        if (ctx.aborted) break
+      }
+
+      if (ctx.aborted && d > 1) break // 本层没搜完 → 采用上一层结果
+      if (localBest) {
+        best = localBest
+        bestScore = localScore
+        const idx = moves.indexOf(localBest)
+        if (idx > 0) {
+          moves.splice(idx, 1)
+          moves.unshift(localBest)
+        }
+      }
+      if (bestScore >= MATE - 10000) break // 已算到杀棋，不必再深搜
+    }
+
+    return best
+  } finally {
+    for (let i = 0; i < masked.length; i++) {
+      masked[i].p.realType = masked[i].realType
+      masked[i].p.color = masked[i].color
+    }
+  }
 }
 
 module.exports = { chooseMove, evaluate, pieceValue, valueOf, hashBoard, MATE, HIDDEN_VALUE }

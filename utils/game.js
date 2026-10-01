@@ -1,7 +1,7 @@
 // ===== 阴阳象棋 · 游戏状态管理（小程序版）=====
 // 纯类、无平台依赖；对外提供棋盘状态与走子/悔棋/胜负/长将判定。
 const { createInitialBoard, createTraditionalBoard } = require('./board')
-const { getLegalTargets, findGeneral, isGeneralUnderAttack, hasAnyLegalMove } = require('./RulesEngine')
+const { getLegalTargets, findGeneral, isGeneralUnderAttack, hasAnyLegalMove, setVariant, pieceSide } = require('./RulesEngine')
 const { charOf } = require('./pieces')
 const { moveToChinese, coordsText } = require('./notation')
 
@@ -27,7 +27,11 @@ class Game {
   }
 
   reset() {
-    // 盲棋开局：洗牌 + 将帅明棋 + 其余暗棋（createInitialBoard，逻辑未改动）
+    // 规则变体注入（引擎模块级开关，同一时刻只跑一局）：
+    //   blind  → 暗棋开局（30 枚全场随机撒位，红黑混住）+ 象可过河 / 士可出九宫
+    //   normal → 传统开局（全明棋）+ 官方规则（象不过河 / 士不出九宫）
+    setVariant(this.mode === 'normal' ? 'standard' : 'blind')
+    // 盲棋开局：全局随机（洗牌 + 将帅明棋 + 其余暗棋，见 createInitialBoard）
     // 传统象棋：全明棋（createTraditionalBoard，与盲棋开局彼此独立）
     this.board = this.mode === 'normal' ? createTraditionalBoard() : createInitialBoard()
     this.currentTurn = 'red'
@@ -50,7 +54,8 @@ class Game {
   select(p) {
     if (this.winner) return
     const piece = this.pieceAtPos(p)
-    if (piece && piece.color === this.currentTurn) {
+    // 归属判定：明棋看真实颜色；暗棋看棋位阵营（红黑双方只能操作自己这半场棋位上的暗子）
+    if (piece && pieceSide(piece, p.y) === this.currentTurn) {
       this.selected = p
       this.legalTargets = getLegalTargets(this.board, p)
     }
@@ -94,7 +99,7 @@ class Game {
     // 棋谱记录（trimCaptured 依赖其 captured / side 字段，不参与规则判定）
     this.moves.push({
       no: this.moveCount,
-      side: piece.color === 'red' ? '红' : '黑',
+      side: pieceSide(piece, from.y) === 'red' ? '红' : '黑', // 操作方（暗子按棋位归属）
       text: text,
       raw: coordsText(from, to),
       captured: captured,
@@ -107,7 +112,7 @@ class Game {
     return {
       board: this.board.map(function (row) {
         return row.map(function (p) {
-          return p ? { id: p.id, realType: p.realType, pos: { x: p.pos.x, y: p.pos.y }, initialPositionType: p.initialPositionType, state: p.state, color: p.color } : null
+          return p ? { id: p.id, realType: p.realType, pos: { x: p.pos.x, y: p.pos.y }, initialPositionType: p.initialPositionType, slotSide: p.slotSide, state: p.state, color: p.color } : null
         })
       }),
       turn: this.currentTurn,

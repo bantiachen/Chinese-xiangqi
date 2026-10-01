@@ -40,10 +40,10 @@ Page({
     modeIcon: 'sun',
     modeName: '阴阳象棋',
 
-    // 对战模式：two = 双人对弈（默认，行为与现在完全一致）；one = 人机对战（你执红，电脑执黑）
-    playerMode: 'two',
-    playerModeLabel: '双人',
-    playerModeText: '双人对战',
+    // 对战模式：one = 人机对战（★默认：你执红先行，电脑执黑自动应招）；two = 双人对弈
+    playerMode: 'one',
+    playerModeLabel: '人机',
+    playerModeText: '单人模式',
     // 人机模式下显示「当前该谁走」；双人模式为空（不显示）
     currentPlayerText: '',
     redName: '红方',
@@ -238,7 +238,7 @@ Page({
       })
   },
 
-  /** 棋盘视图：转为渲染器使用的字符串棋盘（明子 rK / 暗子 r_） */
+  /** 棋盘视图：转为渲染器使用的字符串棋盘（明子 rK / 暗子统一 x_，颜色中立） */
   viewBoard() {
     const b = this.game.board
     const vb = []
@@ -275,7 +275,7 @@ Page({
     const redName = single ? '你' : '红方'
     const blackName = single ? '电脑' : '黑方'
     const sideName = (c) => (single ? (c === 'red' ? '你' : '电脑') : c === 'red' ? '红方' : '黑方')
-    const firstTip = isBlind ? '红方先行，点击暗棋即翻面' : '红方先行，点击棋子开始对弈'
+    const firstTip = sideName('red') + '先行，' + (isBlind ? '点击暗棋即翻面' : '点击棋子开始对弈')
     let tipText
     if (g.winner) tipText = sideName(g.winner) + '胜'
     else if (this.data.thinking) tipText = '电脑思考中…'
@@ -558,9 +558,9 @@ Page({
   /* ============================ 对战模式（切换入口在「设置」面板内） ============================ */
   /**
    * 切换对战模式：
-   *   two = 双人对弈（默认，与本来的行为完全一致，红黑都由人操作）
-   *   one = 人机对战（你执红先行，电脑执黑自动应招；电脑同样遵守盲棋规则且不窥视暗子身份）
-   * 切换不影响棋局模式（盲棋 / 明棋）与盲棋开局构造。
+   *   one = 人机对战（★默认：你执红先行，电脑执黑自动应招；电脑同样遵守暗棋规则、不窥视暗子真身）
+   *   two = 双人对弈（红黑都由人操作）
+   * 切换不影响棋局模式（暗棋 / 传统象棋）与暗棋开局构造。
    */
   onTogglePlayerMode() {
     if (this.busy) return
